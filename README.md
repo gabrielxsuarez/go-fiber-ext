@@ -1,8 +1,14 @@
 # go-fiber-ext
 
-Shared utilities for projects built with [Fiber](https://gofiber.io). Instead of copying the same middleware across repos, this package gives you a single place to pull from.
+Shared utilities for projects built with [Fiber](https://gofiber.io).
 
 Right now it ships one package — `middleware/staticache` — but more may be added over time.
+
+## Installation
+
+```bash
+go get github.com/gabrielxsuarez/go-fiber-ext
+```
 
 ---
 

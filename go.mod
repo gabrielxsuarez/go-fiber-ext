@@ -1,4 +1,4 @@
-module go-fiber-ext
+module github.com/gabrielxsuarez/go-fiber-ext
 
 go 1.25.0
 
