@@ -2,7 +2,7 @@
 
 Shared utilities for projects built with [Fiber](https://gofiber.io).
 
-It currently ships two packages: `filelog` and `middleware/staticache`.
+It currently ships three packages: `filelog`, `middleware/requestlog`, and `middleware/staticache`.
 
 ## Installation
 
@@ -48,6 +48,43 @@ fl := filelog.New("./logs", filelog.Config{
 | `MaxBackups` | Maximum number of old log files to keep.                 |
 | `MaxAge`     | Maximum days to retain old files (0 = no age limit).     |
 | `Compress`   | Gzip rotated files. Pointer to bool (default: `true`).   |
+
+---
+
+## middleware/requestlog
+
+Fiber middleware that logs HTTP requests to a `filelog.FileLog` instance.
+
+- **Access log**: every request whose URL extension is not a known static asset (`.css`, `.js`, `.png`, etc.).
+- **Warning log**: requests with status >= 400, or with an empty/unrecognised `User-Agent` (no mainstream browser token detected).
+
+### Minimal usage
+
+```go
+fl := filelog.New("./logs")
+
+app.Use(requestlog.New(fl))
+```
+
+### Custom skip extensions
+
+```go
+app.Use(requestlog.New(fl, requestlog.Config{
+    SkipExtensions: []string{".css", ".js", ".wasm"},
+}))
+```
+
+| Field            | Description                                                                 |
+| ---------------- | --------------------------------------------------------------------------- |
+| `SkipExtensions` | List of file extensions to exclude from the access log. If nil, uses a sensible default list. |
+
+### Exported helpers
+
+The functions used internally are exported so you can reuse them in custom middleware:
+
+- `ShouldSkipAccess(ext string, skip map[string]struct{}) bool` — checks if an extension is in a skip set.
+- `IsKnownBrowser(ua string) bool` — checks if a User-Agent contains a mainstream browser token (Mozilla, Chrome, Safari, Firefox, Edge, Opera).
+- `DefaultSkipExtensions` — the default extension list (`[]string`).
 
 ---
 
