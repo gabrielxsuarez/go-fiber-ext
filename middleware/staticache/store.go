@@ -60,6 +60,8 @@ func cacheFile(cache *Cache, minifier *minify.M, cfg Config, fsys fs.FS, filePat
 	urlPath := toURLPath(filePath)
 	mimeType, minifyType, managed := classifyFile(urlPath, cfg.CustomMIMETypes)
 	if !managed {
+		sourcePath := strings.TrimPrefix(pathpkg.Clean(filePath), "/")
+		cache.passthrough[urlPath] = sourcePath
 		return nil
 	}
 
@@ -228,6 +230,14 @@ func resolveMIME(ext string) string {
 func computeETag(data []byte) entityTag {
 	sum := sha256.Sum256(data)
 	opaque := fmt.Sprintf("%x", sum[:8])
+	return entityTag{
+		raw:    `"` + opaque + `"`,
+		opaque: opaque,
+	}
+}
+
+func computeStatETag(info fs.FileInfo) entityTag {
+	opaque := fmt.Sprintf("%x-%x", info.ModTime().UnixNano(), info.Size())
 	return entityTag{
 		raw:    `"` + opaque + `"`,
 		opaque: opaque,

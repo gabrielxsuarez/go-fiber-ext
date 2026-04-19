@@ -527,14 +527,25 @@ func TestNonManagedFilesPassThrough(t *testing.T) {
 	}, Config{})
 	app := newTestApp(cache)
 
+	// First request: staticache injects ETag but the file is served by the next handler.
+	// Since there is no fallback handler in the test app, we get 404 but the ETag header
+	// should still be present.
 	resp := performRequest(t, app, http.MethodGet, "/logo.webp", nil)
 	defer resp.Body.Close()
 
-	if resp.StatusCode != fiber.StatusNotFound {
-		t.Fatalf("expected status 404 for unmanaged file without fallback, got %d", resp.StatusCode)
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatalf("expected ETag header for passthrough file, got none")
 	}
-	if got := resp.Header.Get("ETag"); got != "" {
-		t.Fatalf("expected no ETag header for unmanaged file, got %q", got)
+
+	// Second request with If-None-Match: should get 304.
+	resp2 := performRequest(t, app, http.MethodGet, "/logo.webp", map[string]string{
+		"If-None-Match": etag,
+	})
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != fiber.StatusNotModified {
+		t.Fatalf("expected 304 for passthrough file with matching ETag, got %d", resp2.StatusCode)
 	}
 }
 

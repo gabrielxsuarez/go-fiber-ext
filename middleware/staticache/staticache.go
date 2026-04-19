@@ -17,6 +17,7 @@ type Config struct {
 type Cache struct {
 	fsys         fs.FS
 	files        map[string]*cachedFile
+	passthrough  map[string]string // urlPath → sourcePath (known files not loaded into memory)
 	cacheControl string
 	indexFile    string
 	customMIME   map[string]string
@@ -38,6 +39,7 @@ func NewFS(fsys fs.FS, configs ...Config) (*Cache, error) {
 	cache := &Cache{
 		fsys:         fsys,
 		files:        make(map[string]*cachedFile),
+		passthrough:  make(map[string]string),
 		cacheControl: defaultCacheControl,
 		indexFile:    cfg.IndexFile,
 		customMIME:   cfg.CustomMIMETypes,
@@ -69,6 +71,29 @@ func (c *Cache) Handler() fiber.Handler {
 	return c.handler
 }
 
+func (c *Cache) servePassthrough(ctx fiber.Ctx) error {
+	sourcePath, known := c.passthrough[ctx.Path()]
+	if !known {
+		return ctx.Next()
+	}
+
+	info, err := fs.Stat(c.fsys, sourcePath)
+	if err != nil {
+		return ctx.Next()
+	}
+
+	etag := computeStatETag(info)
+	ctx.Set("ETag", etag.raw)
+	applyCachePolicy(ctx, c.cacheControl)
+
+	if matchesIfNoneMatch(ctx.Get("If-None-Match"), etag) {
+		ctx.Status(fiber.StatusNotModified)
+		return nil
+	}
+
+	return ctx.Next()
+}
+
 func (c *Cache) newHandler() fiber.Handler {
 	return func(ctx fiber.Ctx) error {
 		if c.next != nil && c.next(ctx) {
@@ -82,14 +107,14 @@ func (c *Cache) newHandler() fiber.Handler {
 		if c.devMode {
 			resolved, ok := c.resolveDevFile(ctx.Path())
 			if !ok {
-				return ctx.Next()
+				return c.servePassthrough(ctx)
 			}
 			return c.serveDevMode(ctx, resolved)
 		}
 
 		entry, found := c.files[ctx.Path()]
 		if !found {
-			return ctx.Next()
+			return c.servePassthrough(ctx)
 		}
 
 		rep, ok := selectRepresentation(ctx.Get(varyAcceptEncoding), entry)
