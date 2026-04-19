@@ -2,8 +2,8 @@
 // to a [filelog.FileLog] instance.
 //
 // Access log: every request whose URL extension is NOT in the skip set.
-// Warning log: requests that result in status >= 400 or come from an
-// unrecognised User-Agent (empty or not matching any known browser token).
+// Warning log: client errors (4xx) or unrecognised User-Agent.
+// Error log: server errors (5xx).
 //
 // The middleware is opinionated by default but exports its helper functions
 // so they can be reused in custom middleware.
@@ -90,10 +90,15 @@ func New(fl *filelog.FileLog, cfgs ...Config) fiber.Handler {
 			fl.Access("| %s | %s %s (%s)", c.IP(), c.Method(), c.OriginalURL(), duration)
 		}
 
-		// Warning log: error status or unrecognised User-Agent
+		// Warning log: client errors or unrecognised User-Agent
 		ua := c.Get("User-Agent")
-		if status >= http.StatusBadRequest || !IsKnownBrowser(ua) {
+		if (status >= http.StatusBadRequest && status < http.StatusInternalServerError) || !IsKnownBrowser(ua) {
 			fl.Warning("| %s | %s %s (%s) | %d | %q", c.IP(), c.Method(), c.OriginalURL(), duration, status, ua)
+		}
+
+		// Error log: server errors
+		if status >= http.StatusInternalServerError {
+			fl.Error("| %s | %s %s (%s) | %d | %q", c.IP(), c.Method(), c.OriginalURL(), duration, status, ua)
 		}
 
 		return err
