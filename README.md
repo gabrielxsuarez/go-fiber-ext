@@ -2,13 +2,52 @@
 
 Shared utilities for projects built with [Fiber](https://gofiber.io).
 
-Right now it ships one package — `middleware/staticache` — but more may be added over time.
+It currently ships two packages: `filelog` and `middleware/staticache`.
 
 ## Installation
 
 ```bash
 go get github.com/gabrielxsuarez/go-fiber-ext
 ```
+
+---
+
+## filelog
+
+Lazy rolling file loggers with sensible defaults.
+
+Four built-in loggers — Access, Warning, Error, and Event — are created on first use, so only the files you actually write to are created. The `Error` logger also writes to `os.Stderr`. For anything beyond the four built-in loggers, use the generic `Log` method.
+
+Rotation is handled by [lumberjack](https://github.com/natefinch/lumberjack).
+
+### Minimal usage
+
+```go
+fl := filelog.New("./logs")
+
+fl.Access("| %s | %s %s (%s)", ip, method, url, duration)
+fl.Warning("| %s | %s %s | %d | %q", ip, method, url, status, ua)
+fl.Error("db connection failed: %v", err)   // also writes to stderr
+fl.Event("deploy v2.3.1")
+fl.Log("audit", "login from %s", user)      // creates audit.log on first call
+```
+
+### Custom rotation
+
+```go
+fl := filelog.New("./logs", filelog.Config{
+    MaxSize:    50,  // MB per file before rotation (default: 100)
+    MaxBackups: 3,   // old files to keep (default: 5)
+    MaxAge:     30,  // days to retain old files (default: 0 = no limit)
+})
+```
+
+| Field        | Description                                              |
+| ------------ | -------------------------------------------------------- |
+| `MaxSize`    | Maximum size in MB before a log file is rotated.         |
+| `MaxBackups` | Maximum number of old log files to keep.                 |
+| `MaxAge`     | Maximum days to retain old files (0 = no age limit).     |
+| `Compress`   | Gzip rotated files. Pointer to bool (default: `true`).   |
 
 ---
 
