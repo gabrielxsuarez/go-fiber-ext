@@ -2,7 +2,7 @@
 
 Shared utilities for projects built with [Fiber](https://gofiber.io).
 
-It currently ships three packages: `filelog`, `middleware/requestlog`, and `middleware/staticache`.
+It currently ships these packages: `filelog`, `middleware/requestlog`, `middleware/staticache`, `sessionext`, `auth`, and `auth/sessionauth`.
 
 ## Installation
 
@@ -150,3 +150,145 @@ app.Use(cache.Handler())
 | `Next`            | Skip the handler when this function returns `true`.                      |
 
 You can also use `staticache.NewFS(fsys, ...)` to pass any `fs.FS` instead of a directory path.
+
+---
+
+## sessionext
+
+Small defaults and helpers around Fiber's built-in session middleware.
+
+It still uses `github.com/gofiber/fiber/v3/middleware/session` internally; this package only centralizes the cookie name, safe cookie flags, timeouts, and small helpers.
+
+### Minimal usage
+
+```go
+app.Use(sessionext.New(sessionext.Config{
+    AppName:     "appadmin", // cookie: appadmin_session
+    Development: os.Getenv("ENV") == "development",
+}))
+```
+
+Defaults:
+
+- Cookie name: `<app>_session`, or `session` when `AppName` is empty.
+- `HttpOnly`: `true`
+- `SameSite`: `Lax`
+- `Secure`: `false` in development, `true` otherwise
+- `Path`: `/`
+- Idle timeout: `30m`
+
+### Helpers
+
+```go
+sessionext.Set(c, "cart_id", cartID)
+cartID, ok := sessionext.GetString(c, "cart_id")
+sessionext.Delete(c, "cart_id")
+sessionext.Regenerate(c) // after login or privilege elevation
+sessionext.Reset(c)      // logout
+```
+
+For advanced cases you can still provide Fiber session settings:
+
+```go
+app.Use(sessionext.New(sessionext.Config{
+    AppName:         "admin",
+    IdleTimeout:     time.Hour,
+    AbsoluteTimeout: 24 * time.Hour,
+    CookieSecure:    sessionext.Bool(true),
+    Storage:         redisStorage,
+}))
+```
+
+---
+
+## auth
+
+Generic authentication middleware that is independent of a concrete strategy such as cookie sessions, JWT, or API keys.
+
+The shared contract is a `Source`:
+
+```go
+type Source interface {
+    Current(fiber.Ctx) (auth.Principal, bool, error)
+}
+```
+
+`Principal` is intentionally small:
+
+```go
+type Principal struct {
+    Subject string
+    Name    string
+    Roles   []string
+    Data    map[string]string
+}
+```
+
+### Middlewares
+
+```go
+app.Get("/dashboard", auth.Require(source), dashboard)
+app.Get("/admin", auth.RequireRole(source, "admin"), admin)
+app.Get("/ops", auth.RequireAnyRole(source, []string{"admin", "operator"}), ops)
+```
+
+For server-rendered apps, redirect anonymous users:
+
+```go
+app.Get("/dashboard",
+    auth.Require(source, auth.RedirectTo("/login")),
+    dashboard,
+)
+```
+
+Handlers can read the authenticated principal:
+
+```go
+principal, ok := auth.Current(c)
+```
+
+---
+
+## auth/sessionauth
+
+Session-backed implementation of `auth.Source`.
+
+It stores the authenticated `auth.Principal` as a JSON string inside the Fiber session. This avoids Gob type registration for custom structs and keeps app-specific session data in the app.
+
+### Example
+
+```go
+app.Use(sessionext.New(sessionext.Config{
+    AppName:     "appadmin",
+    Development: config.IsDevelopment(),
+}))
+
+sessionAuth := sessionauth.New()
+
+app.Post("/login", func(c fiber.Ctx) error {
+    user := validateUser(c.FormValue("email"), c.FormValue("password"))
+    if user == nil {
+        return c.Redirect().To("/login?error=1")
+    }
+
+    return sessionAuth.Login(c, auth.Principal{
+        Subject: user.ID,
+        Name:    user.Name,
+        Roles:   user.Roles,
+    })
+})
+
+app.Post("/logout", func(c fiber.Ctx) error {
+    if err := sessionAuth.Logout(c); err != nil {
+        return err
+    }
+    return c.Redirect().To("/login")
+})
+
+app.Get("/dashboard",
+    auth.Require(sessionAuth, auth.RedirectTo("/login")),
+    dashboard,
+)
+```
+
+`Login` always regenerates the session ID before saving the principal. `Logout` resets the session.
