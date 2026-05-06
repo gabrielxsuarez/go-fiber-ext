@@ -25,11 +25,12 @@ Rotation is handled by [lumberjack](https://github.com/natefinch/lumberjack).
 ```go
 fl := filelog.New("./logs")
 
-fl.Access("| %s | %s %s (%s)", ip, method, url, duration)
+fl.Access("| %s | %s %s (%s) | %d", ip, method, url, duration, status)
 fl.Warning("| %s | %s %s | %d | %q", ip, method, url, status, ua)
 fl.Error("db connection failed: %v", err)   // also writes to stderr
 fl.Event("deploy v2.3.1")
 fl.Log("audit", "login from %s", user)      // creates audit.log on first call
+defer fl.Close()                            // optional controlled shutdown
 ```
 
 ### Custom rotation
@@ -55,8 +56,11 @@ fl := filelog.New("./logs", filelog.Config{
 
 Fiber middleware that logs HTTP requests to a `filelog.FileLog` instance.
 
-- **Access log**: every request whose URL extension is not a known static asset (`.css`, `.js`, `.png`, etc.).
-- **Warning log**: requests with status >= 400, or with an empty/unrecognised `User-Agent` (no mainstream browser token detected).
+- **Access log**: every request whose URL extension is not a known static asset (`.css`, `.js`, `.png`, etc.) and whose path is not skipped. Includes the response status.
+- **Warning log**: client errors (`4xx`) by default.
+- **Error log**: server errors (`5xx`).
+- **URL redaction**: sensitive query values are redacted by default (`pass`, `password`, `token`, `key`, `secret`).
+- **Default path skip**: `/health` is skipped from access and warning logs, including mounted paths such as `/api/health`.
 
 ### Minimal usage
 
@@ -66,25 +70,43 @@ fl := filelog.New("./logs")
 app.Use(requestlog.New(fl))
 ```
 
-### Custom skip extensions
+### Custom configuration
 
 ```go
 app.Use(requestlog.New(fl, requestlog.Config{
-    SkipExtensions: []string{".css", ".js", ".wasm"},
+    SkipExtensions:       []string{".css", ".js", ".wasm"},
+    SkipPaths:            []string{"/health", "/metrics"},
+    RedactQueryParams:    []string{"pass", "token", "api_key"},
+    WarnUnknownUserAgent: true,
+    KnownUserAgents:      []string{"Mozilla", "RESTClient"},
+    SuspiciousPaths:      []string{"/wp-login.php", "/.env"},
+    SuspiciousLogName:    "suspicious",
 }))
 ```
 
-| Field            | Description                                                                 |
-| ---------------- | --------------------------------------------------------------------------- |
-| `SkipExtensions` | List of file extensions to exclude from the access log. If nil, uses a sensible default list. |
+| Field                  | Description                                                                 |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `SkipExtensions`       | List of file extensions to exclude from the access log. If nil, uses a sensible default list. |
+| `SkipPaths`            | Paths to exclude from access and warning logs. If nil, uses `DefaultSkipPaths`. Exact and mounted suffix matches are accepted. |
+| `RedactQueryParams`    | Query parameter names whose values are redacted. If nil, uses `DefaultRedactQueryParams`. |
+| `WarnUnknownUserAgent` | When true, successful requests with unknown User-Agent tokens also go to `warning.log`. Disabled by default to avoid noisy API logs. |
+| `KnownUserAgents`      | User-Agent substrings accepted when `WarnUnknownUserAgent` is true. If nil, uses `DefaultKnownUserAgents`. |
+| `SuspiciousPaths`      | Paths copied to a separate suspicious log. Empty by default. |
+| `SuspiciousLogName`    | Name used by `filelog.Log` for suspicious requests. Defaults to `suspicious`. |
 
 ### Exported helpers
 
 The functions used internally are exported so you can reuse them in custom middleware:
 
 - `ShouldSkipAccess(ext string, skip map[string]struct{}) bool` — checks if an extension is in a skip set.
-- `IsKnownBrowser(ua string) bool` — checks if a User-Agent contains a mainstream browser token (Mozilla, Chrome, Safari, Firefox, Edge, Opera).
+- `ShouldSkipPath(path string, skip []string) bool` — checks exact and mounted suffix path skips.
+- `RedactURL(rawURL string, params []string) string` — redacts configured query parameter values.
+- `IsKnownBrowser(ua string) bool` — checks if a User-Agent contains a default mainstream browser token.
+- `IsKnownUserAgent(ua string, tokens []string) bool` — checks a User-Agent against custom tokens.
 - `DefaultSkipExtensions` — the default extension list (`[]string`).
+- `DefaultSkipPaths` — the default skipped path list (`[]string`).
+- `DefaultRedactQueryParams` — the default redacted query parameter list (`[]string`).
+- `DefaultKnownUserAgents` — the default User-Agent token list (`[]string`).
 
 ---
 

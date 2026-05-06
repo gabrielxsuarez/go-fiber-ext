@@ -55,9 +55,10 @@ func (c Config) withDefaults() Config {
 
 // FileLog manages a set of rolling file loggers under a single directory.
 type FileLog struct {
-	dir    string
-	cfg    Config
+	dir     string
+	cfg     Config
 	loggers sync.Map // map[string]*log.Logger
+	closers sync.Map // map[string]io.Closer
 }
 
 // New creates a FileLog that writes into dir. The directory is created
@@ -101,24 +102,44 @@ func (fl *FileLog) Log(name string, format string, args ...any) {
 	fl.getOrCreate(name, false).Printf(format, args...)
 }
 
+// Close closes all log files opened by this FileLog instance.
+func (fl *FileLog) Close() error {
+	var firstErr error
+	fl.closers.Range(func(key, value any) bool {
+		if err := value.(io.Closer).Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		fl.closers.Delete(key)
+		fl.loggers.Delete(key)
+		return true
+	})
+	return firstErr
+}
+
 func (fl *FileLog) getOrCreate(name string, withStderr bool) *log.Logger {
 	if v, ok := fl.loggers.Load(name); ok {
 		return v.(*log.Logger)
 	}
 
 	filename := filepath.Join(fl.dir, fmt.Sprintf("%s.log", name))
-	var w io.Writer = &lumberjack.Logger{
+	lj := &lumberjack.Logger{
 		Filename:   filename,
 		MaxSize:    fl.cfg.MaxSize,
 		MaxBackups: fl.cfg.MaxBackups,
 		MaxAge:     fl.cfg.MaxAge,
 		Compress:   *fl.cfg.Compress,
 	}
+	var w io.Writer = lj
 	if withStderr {
 		w = io.MultiWriter(os.Stderr, w)
 	}
 
 	l := log.New(w, "", log.LstdFlags)
-	actual, _ := fl.loggers.LoadOrStore(name, l)
-	return actual.(*log.Logger)
+	actual, loaded := fl.loggers.LoadOrStore(name, l)
+	if loaded {
+		_ = lj.Close()
+		return actual.(*log.Logger)
+	}
+	fl.closers.Store(name, lj)
+	return l
 }
