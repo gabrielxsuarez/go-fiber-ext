@@ -1,17 +1,20 @@
-// Package filelog provides rolling file loggers with sensible defaults.
+// Package filelog provides rolling structured file loggers with sensible
+// defaults.
 //
 // Four built-in loggers are available as typed methods: Access, Warning, Error,
 // and Event. Each one creates its log file lazily — only when the method is
 // called for the first time. The Error logger also writes to os.Stderr.
 //
-// For anything beyond the four built-in loggers, use the generic Log method,
-// which creates a "<name>.log" file on first use.
+// Log files keep the historical ".log" names, but each line is emitted as JSON
+// through slog.JSONHandler. For anything beyond the four built-in loggers, use
+// the generic Log method, which creates a "<name>.log" file on first use.
 package filelog
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -37,6 +40,10 @@ type Config struct {
 	// Compress determines whether rotated log files should be gzipped.
 	// Default: true.
 	Compress *bool
+
+	// App is written as the "app" attribute in every structured log entry.
+	// Default: base name of the log directory.
+	App string
 }
 
 func (c Config) withDefaults() Config {
@@ -57,7 +64,8 @@ func (c Config) withDefaults() Config {
 type FileLog struct {
 	dir     string
 	cfg     Config
-	loggers sync.Map // map[string]*log.Logger
+	app     string
+	loggers sync.Map // map[string]*slog.Logger
 	closers sync.Map // map[string]io.Closer
 }
 
@@ -72,34 +80,63 @@ func New(dir string, cfgs ...Config) *FileLog {
 	cfg = cfg.withDefaults()
 
 	os.MkdirAll(dir, 0o755)
+	app := cfg.App
+	if app == "" {
+		app = filepath.Base(filepath.Clean(dir))
+	}
 
-	return &FileLog{dir: dir, cfg: cfg}
+	return &FileLog{dir: dir, cfg: cfg, app: app}
 }
 
 // Access writes to access.log (created on first call).
 func (fl *FileLog) Access(format string, args ...any) {
-	fl.getOrCreate("access", false).Printf(format, args...)
+	fl.logf("access", slog.LevelInfo, "access", format, args...)
 }
 
 // Warning writes to warning.log (created on first call).
 func (fl *FileLog) Warning(format string, args ...any) {
-	fl.getOrCreate("warning", false).Printf(format, args...)
+	fl.logf("warning", slog.LevelWarn, "warning", format, args...)
 }
 
 // Error writes to error.log AND os.Stderr (created on first call).
 func (fl *FileLog) Error(format string, args ...any) {
-	fl.getOrCreate("error", true).Printf(format, args...)
+	fl.logf("error", slog.LevelError, "error", format, args...)
 }
 
 // Event writes to events.log (created on first call).
 func (fl *FileLog) Event(format string, args ...any) {
-	fl.getOrCreate("events", false).Printf(format, args...)
+	fl.logf("events", slog.LevelInfo, "event", format, args...)
 }
 
 // Log writes to <name>.log (created on first call). This is the escape hatch
 // for loggers beyond the four built-in ones.
 func (fl *FileLog) Log(name string, format string, args ...any) {
-	fl.getOrCreate(name, false).Printf(format, args...)
+	fl.logf(name, slog.LevelInfo, name, format, args...)
+}
+
+// AccessAttrs writes a structured access event to access.log.
+func (fl *FileLog) AccessAttrs(msg string, attrs ...slog.Attr) {
+	fl.logAttrs("access", slog.LevelInfo, msg, attrs...)
+}
+
+// WarningAttrs writes a structured warning event to warning.log.
+func (fl *FileLog) WarningAttrs(msg string, attrs ...slog.Attr) {
+	fl.logAttrs("warning", slog.LevelWarn, msg, attrs...)
+}
+
+// ErrorAttrs writes a structured error event to error.log and os.Stderr.
+func (fl *FileLog) ErrorAttrs(msg string, attrs ...slog.Attr) {
+	fl.logAttrs("error", slog.LevelError, msg, attrs...)
+}
+
+// EventAttrs writes a structured business/operational event to events.log.
+func (fl *FileLog) EventAttrs(msg string, attrs ...slog.Attr) {
+	fl.logAttrs("events", slog.LevelInfo, msg, attrs...)
+}
+
+// LogAttrs writes a structured event to <name>.log.
+func (fl *FileLog) LogAttrs(name string, msg string, attrs ...slog.Attr) {
+	fl.logAttrs(name, slog.LevelInfo, msg, attrs...)
 }
 
 // Close closes all log files opened by this FileLog instance.
@@ -116,9 +153,18 @@ func (fl *FileLog) Close() error {
 	return firstErr
 }
 
-func (fl *FileLog) getOrCreate(name string, withStderr bool) *log.Logger {
+func (fl *FileLog) logf(name string, level slog.Level, msg string, format string, args ...any) {
+	fl.logAttrs(name, level, fmt.Sprintf(format, args...))
+}
+
+func (fl *FileLog) logAttrs(name string, level slog.Level, msg string, attrs ...slog.Attr) {
+	logger := fl.getOrCreate(name, name == "error")
+	logger.LogAttrs(context.Background(), level, msg, attrs...)
+}
+
+func (fl *FileLog) getOrCreate(name string, withStderr bool) *slog.Logger {
 	if v, ok := fl.loggers.Load(name); ok {
-		return v.(*log.Logger)
+		return v.(*slog.Logger)
 	}
 
 	filename := filepath.Join(fl.dir, fmt.Sprintf("%s.log", name))
@@ -134,11 +180,17 @@ func (fl *FileLog) getOrCreate(name string, withStderr bool) *log.Logger {
 		w = io.MultiWriter(os.Stderr, w)
 	}
 
-	l := log.New(w, "", log.LstdFlags)
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	l := slog.New(handler).With(
+		slog.String("app", fl.app),
+		slog.String("log", name),
+	)
 	actual, loaded := fl.loggers.LoadOrStore(name, l)
 	if loaded {
 		_ = lj.Close()
-		return actual.(*log.Logger)
+		return actual.(*slog.Logger)
 	}
 	fl.closers.Store(name, lj)
 	return l

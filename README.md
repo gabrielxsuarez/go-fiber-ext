@@ -14,9 +14,11 @@ go get github.com/gabrielxsuarez/go-fiber-ext
 
 ## filelog
 
-Lazy rolling file loggers with sensible defaults.
+Lazy rolling JSON line file loggers with sensible defaults.
 
 Four built-in loggers — Access, Warning, Error, and Event — are created on first use, so only the files you actually write to are created. The `Error` logger also writes to `os.Stderr`. For anything beyond the four built-in loggers, use the generic `Log` method.
+
+File names keep the historical `.log` extension (`access.log`, `warning.log`, `error.log`, `events.log`, etc.), but every line is emitted by `slog.JSONHandler`. Existing formatted methods remain source-compatible and write the formatted text as the JSON `msg` field. New `*Attrs` methods accept structured `slog.Attr` fields.
 
 Rotation is handled by [lumberjack](https://github.com/natefinch/lumberjack).
 
@@ -33,6 +35,13 @@ fl.Log("audit", "login from %s", user)      // creates audit.log on first call
 defer fl.Close()                            // optional controlled shutdown
 ```
 
+Structured usage:
+
+```go
+fl.EventAttrs("deploy", slog.String("version", "v2.3.1"))
+fl.LogAttrs("audit", "login", slog.String("user", user))
+```
+
 ### Custom rotation
 
 ```go
@@ -40,6 +49,7 @@ fl := filelog.New("./logs", filelog.Config{
     MaxSize:    50,  // MB per file before rotation (default: 100)
     MaxBackups: 3,   // old files to keep (default: 5)
     MaxAge:     30,  // days to retain old files (default: 0 = no limit)
+    App:        "my-app",
 })
 ```
 
@@ -49,6 +59,7 @@ fl := filelog.New("./logs", filelog.Config{
 | `MaxBackups` | Maximum number of old log files to keep.                 |
 | `MaxAge`     | Maximum days to retain old files (0 = no age limit).     |
 | `Compress`   | Gzip rotated files. Pointer to bool (default: `true`).   |
+| `App`        | Value written as the `app` field. Defaults to the base name of the log directory. |
 
 ---
 
@@ -56,10 +67,11 @@ fl := filelog.New("./logs", filelog.Config{
 
 Fiber middleware that logs HTTP requests to a `filelog.FileLog` instance.
 
-- **Access log**: every request whose URL extension is not a known static asset (`.css`, `.js`, `.png`, etc.) and whose path is not skipped. Includes the response status.
+- **Access log**: every request whose URL extension is not a known static asset (`.css`, `.js`, `.png`, etc.) and whose path is not skipped. Includes structured fields such as `request_id`, `method`, `path`, `route`, `status`, `dur_ms`, `client_ip`, `ua`, and byte counts.
 - **Warning log**: client errors (`4xx`) by default.
 - **Error log**: server errors (`5xx`).
-- **URL redaction**: sensitive query values are redacted by default (`pass`, `password`, `token`, `key`, `secret`).
+- **Request ID**: reads an incoming `X-Request-ID` when valid, otherwise creates one, writes it to the response header, and logs it as `request_id`.
+- **URL redaction**: sensitive query values are redacted by default (`authorization`, `auth`, `pass`, `password`, `token`, `key`, `secret`, `clave`, `usuario_clave`, `api_key`, `apikey`, `access_token`, `refresh_token`, `bearer`).
 - **Default path skip**: `/health` is skipped from access and warning logs, including mounted paths such as `/api/health`.
 
 ### Minimal usage
@@ -69,6 +81,8 @@ fl := filelog.New("./logs")
 
 app.Use(requestlog.New(fl))
 ```
+
+Handlers can read the current request ID from Fiber locals through `requestlog.RequestID(c)`.
 
 ### Custom configuration
 
@@ -81,6 +95,7 @@ app.Use(requestlog.New(fl, requestlog.Config{
     KnownUserAgents:      []string{"Mozilla", "RESTClient"},
     SuspiciousPaths:      []string{"/wp-login.php", "/.env"},
     SuspiciousLogName:    "suspicious",
+    RequestIDHeader:      "X-Request-ID",
 }))
 ```
 
@@ -93,6 +108,7 @@ app.Use(requestlog.New(fl, requestlog.Config{
 | `KnownUserAgents`      | User-Agent substrings accepted when `WarnUnknownUserAgent` is true. If nil, uses `DefaultKnownUserAgents`. |
 | `SuspiciousPaths`      | Paths copied to a separate suspicious log. Empty by default. |
 | `SuspiciousLogName`    | Name used by `filelog.Log` for suspicious requests. Defaults to `suspicious`. |
+| `RequestIDHeader`      | Header used to read and write request IDs. Defaults to `X-Request-ID`. |
 
 ### Exported helpers
 
@@ -101,6 +117,8 @@ The functions used internally are exported so you can reuse them in custom middl
 - `ShouldSkipAccess(ext string, skip map[string]struct{}) bool` — checks if an extension is in a skip set.
 - `ShouldSkipPath(path string, skip []string) bool` — checks exact and mounted suffix path skips.
 - `RedactURL(rawURL string, params []string) string` — redacts configured query parameter values.
+- `RedactQueryString(rawQuery string, params []string) string` — redacts configured query parameter values in a raw query string.
+- `RequestID(c fiber.Ctx) string` — returns the request ID stored in Fiber locals by the middleware.
 - `IsKnownBrowser(ua string) bool` — checks if a User-Agent contains a default mainstream browser token.
 - `IsKnownUserAgent(ua string, tokens []string) bool` — checks a User-Agent against custom tokens.
 - `DefaultSkipExtensions` — the default extension list (`[]string`).

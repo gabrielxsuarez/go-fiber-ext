@@ -10,9 +10,14 @@
 package requestlog
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,7 +44,9 @@ var DefaultSkipPaths = []string{
 // DefaultRedactQueryParams is the list of query parameter names whose values
 // are redacted in request logs.
 var DefaultRedactQueryParams = []string{
-	"pass", "password", "token", "key", "secret",
+	"authorization", "auth", "pass", "password", "token", "key", "secret",
+	"clave", "usuario_clave", "api_key", "apikey", "access_token",
+	"refresh_token", "bearer",
 }
 
 // DefaultKnownUserAgents are substrings present in every mainstream browser's
@@ -47,6 +54,11 @@ var DefaultRedactQueryParams = []string{
 var DefaultKnownUserAgents = []string{
 	"Mozilla", "Chrome", "Safari", "Firefox", "Edge", "Opera",
 }
+
+// RequestIDLocalKey is the Fiber locals key used to expose the request ID.
+const RequestIDLocalKey = "request_id"
+
+const maxRequestIDLength = 128
 
 // Config controls the behaviour of the request logger middleware.
 // All fields are optional; zero values use sensible defaults.
@@ -82,6 +94,10 @@ type Config struct {
 	// SuspiciousLogName is the filelog name used for SuspiciousPaths. It
 	// defaults to "suspicious", creating suspicious.log on first use.
 	SuspiciousLogName string
+
+	// RequestIDHeader is the header used to read/write request IDs.
+	// Default: X-Request-ID.
+	RequestIDHeader string
 }
 
 // ShouldSkipAccess reports whether ext (e.g. ".css") is a static asset
@@ -164,6 +180,25 @@ func RedactURL(rawURL string, params []string) string {
 	return parsed.RequestURI()
 }
 
+// RedactQueryString redacts configured query parameter values in a raw query
+// string without the leading '?'.
+func RedactQueryString(rawQuery string, params []string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	redacted := RedactURL("/?"+rawQuery, params)
+	if strings.HasPrefix(redacted, "/?") {
+		return strings.TrimPrefix(redacted, "/?")
+	}
+	return rawQuery
+}
+
+// RequestID returns the request ID stored by this middleware in Fiber locals.
+func RequestID(c fiber.Ctx) string {
+	requestID, _ := c.Locals(RequestIDLocalKey).(string)
+	return requestID
+}
+
 // New creates a Fiber middleware that logs requests to fl.
 func New(fl *filelog.FileLog, cfgs ...Config) fiber.Handler {
 	var cfg Config
@@ -199,22 +234,29 @@ func New(fl *filelog.FileLog, cfgs ...Config) fiber.Handler {
 	if suspiciousLogName == "" {
 		suspiciousLogName = "suspicious"
 	}
+	requestIDHeader := cfg.RequestIDHeader
+	if requestIDHeader == "" {
+		requestIDHeader = fiber.HeaderXRequestID
+	}
 
 	return func(c fiber.Ctx) error {
+		requestID := ensureRequestID(c, requestIDHeader)
 		start := time.Now()
 		err := c.Next()
-		duration := time.Since(start).Round(time.Millisecond)
+		duration := time.Since(start)
 
 		path := c.Path()
-		status := c.Response().StatusCode()
+		status := statusCode(c.Response().StatusCode(), err)
 		ext := strings.ToLower(filepath.Ext(path))
 		skipPath := ShouldSkipPath(path, skipPaths)
 		logURL := RedactURL(c.OriginalURL(), redactQueryParams)
+		query := RedactQueryString(string(c.Request().URI().QueryString()), redactQueryParams)
 		ua := c.Get("User-Agent")
+		attrs := requestAttrs(c, requestID, logURL, query, status, duration, err)
 
 		// Access log: skip static assets and configured noisy endpoints.
 		if !skipPath && !ShouldSkipAccess(ext, skipExts) {
-			fl.Access("| %s | %s %s (%s) | %d", c.IP(), c.Method(), logURL, duration, status)
+			fl.AccessAttrs("http_request", attrs...)
 		}
 
 		// Warning log: client errors, optionally unknown User-Agents.
@@ -223,18 +265,122 @@ func New(fl *filelog.FileLog, cfgs ...Config) fiber.Handler {
 			warn = true
 		}
 		if warn && !skipPath {
-			fl.Warning("| %s | %s %s (%s) | %d | %q", c.IP(), c.Method(), logURL, duration, status, ua)
+			fl.WarningAttrs("http_warning", attrs...)
 		}
 
 		// Error log: server errors
 		if status >= http.StatusInternalServerError {
-			fl.Error("| %s | %s %s (%s) | %d | %q", c.IP(), c.Method(), logURL, duration, status, ua)
+			fl.ErrorAttrs("http_error", attrs...)
 		}
 
 		if len(cfg.SuspiciousPaths) > 0 && ShouldSkipPath(path, cfg.SuspiciousPaths) {
-			fl.Log(suspiciousLogName, "| %s | %s %s (%s) | %d | %q", c.IP(), c.Method(), logURL, duration, status, ua)
+			fl.LogAttrs(suspiciousLogName, "http_suspicious", attrs...)
 		}
 
 		return err
 	}
+}
+
+func requestAttrs(c fiber.Ctx, requestID, logURL, query string, status int, duration time.Duration, err error) []slog.Attr {
+	attrs := []slog.Attr{
+		slog.String("request_id", requestID),
+		slog.String("client_ip", copyString(c.IP())),
+		slog.String("xff", copyString(c.Get(fiber.HeaderXForwardedFor))),
+		slog.String("host", copyString(c.Hostname())),
+		slog.String("method", copyString(c.Method())),
+		slog.String("path", copyString(c.Path())),
+		slog.String("route", routePath(c)),
+		slog.String("url", copyString(logURL)),
+		slog.String("query", copyString(query)),
+		slog.Int("status", status),
+		slog.Int64("dur_ms", duration.Milliseconds()),
+		slog.Int("req_bytes", len(c.Request().Body())),
+		slog.Int("resp_bytes", nonNegative(c.Response().Header.ContentLength())),
+		slog.String("ua", copyString(c.Get(fiber.HeaderUserAgent))),
+		slog.String("referer", copyString(c.Get(fiber.HeaderReferer))),
+		slog.String("content_type", copyString(c.Get(fiber.HeaderContentType))),
+		slog.String("accept_encoding", copyString(c.Get(fiber.HeaderAcceptEncoding))),
+		slog.String("content_encoding", copyString(c.GetRespHeader(fiber.HeaderContentEncoding))),
+	}
+	if err != nil {
+		attrs = append(attrs,
+			slog.String("error", copyString(err.Error())),
+			slog.String("error_kind", errorKind(err)),
+		)
+	}
+	return attrs
+}
+
+func statusCode(current int, err error) int {
+	if err == nil {
+		return current
+	}
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) && fiberErr.Code > 0 {
+		return fiberErr.Code
+	}
+	if current >= http.StatusBadRequest {
+		return current
+	}
+	return http.StatusInternalServerError
+}
+
+func errorKind(err error) string {
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		return "fiber_" + strconv.Itoa(fiberErr.Code)
+	}
+	return "error"
+}
+
+func routePath(c fiber.Ctx) string {
+	route := c.Route()
+	if route == nil {
+		return ""
+	}
+	return copyString(route.Path)
+}
+
+func nonNegative(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+func ensureRequestID(c fiber.Ctx, header string) string {
+	requestID := c.Get(header)
+	if !validRequestID(requestID) {
+		requestID = generateRequestID()
+	}
+	c.Set(header, requestID)
+	c.Locals(RequestIDLocalKey, requestID)
+	return copyString(requestID)
+}
+
+func validRequestID(value string) bool {
+	if value == "" || len(value) > maxRequestIDLength {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func generateRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func copyString(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.Clone(value)
 }
